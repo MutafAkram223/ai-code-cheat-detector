@@ -6,3 +6,8 @@ scikit-learn>=1.2
 lizard>=1.19.0
 pandas>=1.5
 regex
+matplotlib
+requests
+groq
+python-dotenv
+
