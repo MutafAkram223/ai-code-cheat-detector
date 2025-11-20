@@ -1,4 +1,4 @@
-# AI-Cheat-Detector (C++) — Demo
+# AI-Cheat-Detector (C++)
 
 This repository implements an academic/demo system for detecting AI-generated C++ competitive programming solutions.
 
