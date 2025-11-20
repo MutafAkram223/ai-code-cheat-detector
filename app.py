@@ -26,15 +26,13 @@ AI_SAMPLES_DIR = os.path.join(DATA_DIR, "ai_samples")
 ensure_dirs([DATA_DIR, LOGS_DIR, AI_SAMPLES_DIR])
 
 
-# ---------- Streamlit ----------
-st.set_page_config(page_title="AI Cheat Detector (C++)", layout="wide")
-st.title("Competitive Programming Code Cheating Detection (C++)")
-st.markdown("""
-This system evaluates whether a submitted C++ solution is **AI-generated** or **human-written**.
-""")
+# ---------- STREAMLIT UI ----------
+st.set_page_config(page_title="Competitive Programming Shield", layout="wide")
+st.title("Competitive Programming Shield — C++ Cheating Detection")
+st.markdown("This system evaluates whether a submitted C++ solution is AI-generated or human-written.")
 
 
-# ---------- Session State ----------
+# ---------- SESSION STATE ----------
 if "events" not in st.session_state:
     st.session_state["events"] = []
 
@@ -47,8 +45,11 @@ if "started_at" not in st.session_state:
 if "last_event_time" not in st.session_state:
     st.session_state["last_event_time"] = None
 
+if "paste_lengths" not in st.session_state:
+    st.session_state["paste_lengths"] = []
 
-# ---------- Layout ----------
+
+# ---------- LAYOUT ----------
 col1, col2 = st.columns([1.2, 1])
 
 with col1:
@@ -58,7 +59,7 @@ with col1:
     st.subheader("C++ Code Editor")
     editor_mode = st.selectbox("Editor theme", ["github", "monokai", "textmate"], index=0)
 
-    initial_code = "// Type your C++ solution here\n#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    return 0;\n}\n"
+    initial_code = ""  # start empty to avoid template noise
 
     code = st_ace(
         value=st.session_state["last_code"] or initial_code,
@@ -73,94 +74,114 @@ with col1:
 
 with col2:
     st.subheader("Recent Runs")
-    history_files = sorted(
-        [f for f in os.listdir(LOGS_DIR) if f.endswith(".json")],
-        reverse=True
-    )
+    history_files = sorted([f for f in os.listdir(LOGS_DIR) if f.endswith(".json")], reverse=True)
     if history_files:
         for f in history_files[:6]:
-            st.write(f"- {f}")
+            st.write("- " + f)
     else:
         st.write("No runs available.")
 
 
 # ---------- EVENT TRACKING ----------
 now = time.time()
+prev_code = st.session_state.get("last_code", "")
+cur_code = code
 
-if st.session_state["started_at"] is None and code.strip() != "":
-    st.session_state["started_at"] = now
+if prev_code == "" and cur_code == "":
+    st.session_state["last_code"] = cur_code
     st.session_state["last_event_time"] = now
 
-    init_len = len(code)
-    st.session_state["events"].append({
-        "t": now,
-        "len": init_len,
-        "delta": init_len,
-        "interval": 0.0
-    })
-    st.session_state["last_code"] = code
-
-if code != st.session_state["last_code"]:
-    prev_len = len(st.session_state["last_code"])
-    cur_len = len(code)
+elif cur_code != prev_code:
+    prev_len = len(prev_code)
+    cur_len = len(cur_code)
     delta = cur_len - prev_len
-    interval = now - (st.session_state["last_event_time"] or now)
+    interval = max(now - (st.session_state.get("last_event_time") or now), 0.001)
+    speed = delta / interval if interval > 0 else 0.0
 
     st.session_state["events"].append({
         "t": now,
         "len": cur_len,
         "delta": delta,
-        "interval": interval
+        "interval": interval,
+        "speed": speed
     })
 
-    st.session_state["last_code"] = code
+    if st.session_state["started_at"] is None:
+        st.session_state["started_at"] = now
+
+    # heuristic paste_lengths (kept for backward compatibility / debug)
+    if delta >= 120 and interval <= 1.5:
+        st.session_state["paste_lengths"].append(delta)
+    elif delta >= 60 and interval <= 0.8:
+        st.session_state["paste_lengths"].append(delta)
+    elif delta >= 40 and interval <= 0.5:
+        st.session_state["paste_lengths"].append(delta)
+
+    st.session_state["last_code"] = cur_code
     st.session_state["last_event_time"] = now
 
 
-# ---------- SUBMIT LOGIC ----------
+# ---------- SUBMIT ----------
 if submit:
-
     code_text = code or ""
-    start = st.session_state["started_at"]
-    total_time = (now - start) if start else None
+    start = st.session_state.get("started_at")
+    total_time = (time.time() - start) if start else None
 
-    # ========== BEHAVIOR ANALYSIS ==========
+    # 1) Use a copy of events for analysis so we don't lose state during debug
+    events_for_analysis = list(st.session_state.get("events", []))
+
+    # 2) SYNTHETIC final event to capture immediate paste+submit race condition:
+    #    If editor content is longer than last recorded event, append a synthetic event
+    last_recorded_len = events_for_analysis[-1]["len"] if events_for_analysis else 0
+    now_ts = time.time()
+    if len(code_text) - last_recorded_len > 0:
+        synthetic_delta = len(code_text) - last_recorded_len
+        synthetic_interval = max(now_ts - (events_for_analysis[-1]["t"] if events_for_analysis else now_ts), 0.001)
+        events_for_analysis.append({
+            "t": now_ts,
+            "len": len(code_text),
+            "delta": synthetic_delta,
+            "interval": synthetic_interval,
+            "speed": synthetic_delta / synthetic_interval
+        })
+
+    # 3) Call behavior agent with the synthesized event list
     behavior_report = analyze_behavior_events(
-        st.session_state["events"],
-        total_time=total_time,
-        code_text=code_text
+        events_for_analysis,
+        st.session_state.get("paste_lengths", []),
+        total_time,
+        code_text
     )
 
-    # ========== RESET SESSION AFTER SUBMIT ==========
+    # For debugging: store snapshots (optional)
+    st.session_state["last_run_events"] = events_for_analysis
+    st.session_state["last_behavior_debug"] = behavior_report.get("debug", {})
+
+    # Reset tracking state AFTER we snapshot and analyze
     st.session_state["events"] = []
     st.session_state["last_code"] = ""
     st.session_state["started_at"] = None
     st.session_state["last_event_time"] = None
+    st.session_state["paste_lengths"] = []
 
-    # ========== RUN NAME ==========
+    # --- Continue with the rest of your pipeline ---
     timestamp = int(time.time())
     run_name = f"run_{timestamp}"
     run_dir = os.path.join(LOGS_DIR, run_name)
     os.makedirs(run_dir, exist_ok=True)
 
-    # Save files
-    with open(os.path.join(run_dir, "problem.txt"), "w") as f:
-        f.write(problem_text)
-    with open(os.path.join(run_dir, "solution.cpp"), "w") as f:
-        f.write(code_text)
+    with open(os.path.join(run_dir, "problem.txt"), "w", encoding="utf-8") as f:
+        f.write(problem_text or "")
+    with open(os.path.join(run_dir, "solution.cpp"), "w", encoding="utf-8") as f:
+        f.write(code_text or "")
 
-    # ========== PIPELINE ==========
-    problem_features = parse_problem(problem_text)
-    ai_sample_paths = generate_ai_samples_for_problem(problem_text, run_dir, num=3)
+    problem_features = parse_problem(problem_text or "")
+    ai_sample_paths = generate_ai_samples_for_problem(problem_text or "", run_dir, num=3)
     embedding_result = compute_embedding_scores(code_text, ai_sample_paths)
     ast_metrics = analyze_structure(code_text)
     stat_metrics = compute_statistical_scores(code_text)
     pattern_metrics = detect_patterns(code_text)
     nlp_metrics = analyze_comments(code_text)
-
-    behavior_score_struct = {
-        "behavioral_score": behavior_report["behavioral_score"]
-    }
 
     all_scores = {
         "embedding_similarity": embedding_result.get("similarity_score", 0.0),
@@ -168,7 +189,7 @@ if submit:
         "statistical_anomaly_score": stat_metrics.get("stat_score", 0.0),
         "pattern_score": pattern_metrics.get("pattern_score", 0.0),
         "linguistic_score": nlp_metrics.get("linguistic_score", 0.0),
-        "behavioral_score": behavior_score_struct["behavioral_score"],
+        "behavioral_score": behavior_report.get("behavioral_score", 0.0),
     }
 
     result = compute_final_decision(all_scores)
@@ -183,31 +204,27 @@ if submit:
         "pattern_metrics": pattern_metrics,
         "nlp_metrics": nlp_metrics,
         "behavior_report": behavior_report,
+        "behavior_debug": behavior_report.get("debug", {}),
+        "events_used": events_for_analysis,
         "all_scores": all_scores,
         "final_result": result
     })
 
-    # ========== OUTPUT ==========
+    # OUTPUT
     st.subheader("Detection Result")
     st.metric("Verdict", result["verdict"], f"{result['confidence']*100:.1f}%")
 
-    # === CHEAT PROBABILITY CHART ===
     st.write("### Cheating Probability Chart")
-
     fig, ax = plt.subplots(figsize=(6, 1.4))
-
     prob = result["final_score"]
     color = "red" if prob >= 0.60 else "orange" if prob >= 0.40 else "green"
-
     ax.barh(["Cheat Probability"], [prob], color=color)
     ax.set_xlim(0, 1)
     ax.set_xlabel("0 = Human    |    1 = AI")
     ax.set_title("Cheating Likelihood Score")
     ax.grid(axis='x', linestyle='--', alpha=0.4)
-
     st.pyplot(fig)
 
-    # === SIGNAL SCORES ===
     st.write("### Signal Scores")
     st.write(pd.DataFrame({
         "signal": list(all_scores.keys()),
@@ -216,5 +233,12 @@ if submit:
 
     st.write("### Explanation")
     st.markdown(explain_decision(result, all_scores))
+
+    # Debug sidebar info (helps you verify what's being used)
+    with st.sidebar:
+        st.subheader("Behavior Debug")
+        st.write("behavior_report:", behavior_report)
+        st.write("events_used (last 10):", events_for_analysis[-10:])
+        st.write("behavior_debug:", behavior_report.get("debug", {}))
 
     st.success("Run complete.")
